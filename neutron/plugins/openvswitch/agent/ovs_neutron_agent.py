@@ -18,6 +18,7 @@ import hashlib
 import signal
 import sys
 import time
+import uuid
 
 import netaddr
 from oslo_config import cfg
@@ -52,6 +53,7 @@ cfg.CONF.import_group('AGENT', 'neutron.plugins.openvswitch.common.config')
 
 # A placeholder for dead vlans.
 DEAD_VLAN_TAG = q_const.MAX_VLAN_TAG + 1
+UINT64_BITMASK = (1 << 64) - 1
 
 
 class DeviceListRetrievalError(exceptions.NeutronException):
@@ -196,6 +198,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
 
         # Keep track of int_br's device count for use by _report_state()
         self.int_br_device_count = 0
+        self.agent_uuid_stamp = uuid.uuid64().int & UINT64_BITMASK
 
         self.int_br = ovs_lib.OVSBridge(integ_br)
         self.setup_integration_br()
@@ -224,8 +227,8 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
         self.patch_tun_ofport = constants.OFPORT_INVALID
         if self.enable_tunneling:
             # The patch_int_ofport and patch_tun_ofport are updated
-            # here inside the call to reset_tunnel_br()
-            self.reset_tunnel_br(tun_br)
+            # here inside the call to setup_tunnel_br()
+            self.setup_tunnel_br(tun_br)
 
         self.dvr_agent = ovs_dvr_neutron_agent.OVSDVRNeutronAgent(
             self.context,
@@ -249,7 +252,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
             heartbeat.start(interval=report_interval)
 
         if self.enable_tunneling:
-            self.setup_tunnel_br()
+            self.setup_tunnel_br_flows()
 
         self.dvr_agent.setup_dvr_flows()
 
@@ -812,8 +815,8 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
     def setup_integration_br(self):
         '''Setup the integration bridge.
 
-        Delete patch ports and remove all existing flows.
         '''
+        self.inb_br_set_agent_uuid_stamp(self.agent_uuid_stamp)
         # Ensure the integration bridge is created.
         # ovs_lib.OVSBridge.create() will run
         #   ovs-vsctl -- --may-exist add-br BRIDGE_NAME
@@ -822,7 +825,8 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
         self.int_br.set_secure_mode()
 
         self.int_br.delete_port(cfg.CONF.OVS.int_peer_patch_port)
-        self.int_br.remove_all_flows()
+        if cfg.CONF.AGENT.drop_flows_on_start:
+          self.int_br.remove_all_flows()
         # switch all traffic using L2 learning
         self.int_br.add_flow(priority=1, actions="normal")
         # Add a canary flow to int_br to track OVS restarts
@@ -855,7 +859,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
             ancillary_bridges.append(br)
         return ancillary_bridges
 
-    def reset_tunnel_br(self, tun_br_name=None):
+    def setup_tunnel_br(self, tun_br_name=None):
         '''(re)initialize the tunnel bridge.
 
         Creates tunnel bridge, and links it to the integration bridge
@@ -865,12 +869,20 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
         '''
         if not self.tun_br:
             self.tun_br = ovs_lib.OVSBridge(tun_br_name)
+        self.tun_br.set_agent_uuid_stamp(self.agent_uuid_stamp)
 
-        self.tun_br.reset_bridge(secure_mode=True)
-        self.patch_tun_ofport = self.int_br.add_patch_port(
-            cfg.CONF.OVS.int_peer_patch_port, cfg.CONF.OVS.tun_peer_patch_port)
-        self.patch_int_ofport = self.tun_br.add_patch_port(
-            cfg.CONF.OVS.tun_peer_patch_port, cfg.CONF.OVS.int_peer_patch_port)
+        if not self.tun_br.bridge_exists('br-tun'):
+            self.tun_br.create(secure_mode=True)
+				if (not self.int_br.port_exists(cfg.CONF.OVS.int_peer_patch_port) or
+                self.patch_tun_ofport == ovs_lib.INVALID_OFPORT):
+            self.patch_tun_ofport = self.int_br.add_patch_port(
+                cfg.CONF.OVS.int_peer_patch_port,
+                cfg.CONF.OVS.tun_peer_patch_port)
+        if (not self.tun_br.port_exists(cfg.CONF.OVS.int_tun_patch_port) or
+                self.patch_int_ofport == ovs_lib.INVALID_OFPORT):
+            self.patch_int_ofport = self.tun_br.add_patch_port(
+                cfg.CONF.OVS.tun_peer_patch_port,
+                cfg.CONF.OVS.int_peer_patch_port)
         if ovs_lib.INVALID_OFPORT in (self.patch_tun_ofport,
                                       self.patch_int_ofport):
             LOG.error(_LE("Failed to create OVS patch port. Cannot have "
@@ -878,9 +890,10 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
                           "version of OVS does not support tunnels or patch "
                           "ports. Agent terminated!"))
             exit(1)
-        self.tun_br.remove_all_flows()
+        if cfg.CONF.AGENT.drop_flows_on_start:
+            self.tun_br.remove_all_flows()
 
-    def setup_tunnel_br(self):
+    def setup_tunnel_br_flows(self):
         '''Setup the tunnel bridge.
 
         Add all flows to the tunnel bridge.
@@ -929,7 +942,8 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
                         "load:0->NXM_OF_VLAN_TCI[],"
                         "load:NXM_NX_TUN_ID[]->NXM_NX_TUN_ID[],"
                         "output:NXM_OF_IN_PORT[]" %
-                        constants.UCAST_TO_TUN)
+                        {'cookie': self.agent_uuid_stamp,
+                         'table': constants.UCAST_TO_TUN})
         # Once remote mac addresses are learnt, output packet to patch_int
         self.tun_br.add_flow(table=constants.LEARN_FROM_TUN,
                              priority=1,
@@ -1016,9 +1030,15 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
                                              bridge)
             phys_if_name = self.get_peer_name(constants.PEER_PHYSICAL_PREFIX,
                                               bridge)
-            self.int_br.delete_port(int_if_name)
-            br.delete_port(phys_if_name)
+            # Interface type of port for physical and integration bridges must
+            # be same, so check only one of them.
+            int_type = self.int_br.db_get_val("Interface", int_if_name, "type")
             if self.use_veth_interconnection:
+                # Drop ports if the interface types doesn't match the
+                # configuration value.
+                if int_type == 'patch':
+                    self.int_br.delete_port(int_if_name)
+                    br.delete_port(phys_if_name)
                 if ip_lib.device_exists(int_if_name):
                     ip_lib.IPDevice(int_if_name).link.delete()
                     # Give udev a chance to process its rules here, to avoid
@@ -1030,6 +1050,11 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
                 int_ofport = self.int_br.add_port(int_veth)
                 phys_ofport = br.add_port(phys_veth)
             else:
+                # Drop ports if the interface type doesn't match the
+                # configuration value
+                if int_type == 'veth':
+                    self.int_br.delete_port(int_if_name)
+                    br.delete_port(phys_if_name)
                 # Create patch ports without associating them in order to block
                 # untranslated traffic before association
                 int_ofport = self.int_br.add_patch_port(
@@ -1519,6 +1544,15 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
                        'elapsed': elapsed})
         self.iter_num = self.iter_num + 1
 
+    def cleanup_stale_flows(self):
+        if self.iter_num == 0:
+            bridges = [self.int_br]
+            if self.enable_tunneling:
+                bridges.append(self.tun_br)
+            for bridge in bridges:
+                LOG.info(_LI("Cleaning stale %s flows"), bridge.br_name)
+                bridge.cleanup_flows()
+
     def rpc_loop(self, polling_manager=None):
         if not polling_manager:
             polling_manager = polling.get_polling_manager(
@@ -1551,8 +1585,8 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
                 self.setup_integration_br()
                 self.setup_physical_bridges(self.bridge_mappings)
                 if self.enable_tunneling:
-                    self.reset_tunnel_br()
                     self.setup_tunnel_br()
+                    self.setup_tunnel_br_flows()
                     tunnel_sync = True
                 if self.enable_distributed_routing:
                     self.dvr_agent.reset_ovs_parameters(self.int_br,
@@ -1607,6 +1641,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
                         # If treat devices fails - must resync with plugin
                         sync = self.process_network_ports(port_info,
                                                           ovs_restarted)
+                        self.cleanup_stale_flows()
                         LOG.debug("Agent rpc_loop - iteration:%(iter_num)d - "
                                   "ports processed. Elapsed:%(elapsed).3f",
                                   {'iter_num': self.iter_num,

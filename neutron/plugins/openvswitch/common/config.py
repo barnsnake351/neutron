@@ -94,6 +94,9 @@ agent_opts = [
                help=_("Set new timeout in seconds for new rpc calls after "
                       "agent receives SIGTERM. If value is set to 0, rpc "
                       "timeout won't be changed"))
+    cfg.boolOpt('drop_flows_on_start', default=False,
+                help=_("Reset flow table on start. Setting this to True will "
+                       "cause brief traffic interruption."))
 ]
 
 

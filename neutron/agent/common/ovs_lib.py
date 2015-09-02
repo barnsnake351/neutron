@@ -16,6 +16,7 @@
 import collections
 import itertools
 import operator
+import re
 
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -141,9 +142,14 @@ class BaseOVS(object):
 
 
 class OVSBridge(BaseOVS):
+    agent_uuid_stamp = '0x0'
+
     def __init__(self, br_name):
         super(OVSBridge, self).__init__()
         self.br_name = br_name
+
+    def set_agent_uuid_stamp(self, val):
+        self.agent_uuid_stamp = val
 
     def set_controller(self, controllers):
         self.ovsdb.set_controller(self.br_name,
@@ -164,8 +170,12 @@ class OVSBridge(BaseOVS):
         self.set_db_attribute('Bridge', self.br_name, 'protocols', protocols,
                               check_error=True)
 
-    def create(self):
-        self.ovsdb.add_br(self.br_name).execute()
+    def create(self, secure_mode=False):
+        with self.ovsdb.transaction() as txn:
+            txn.add(self.ovsdb.add_br(self.br_name))
+            if secure_mode:
+                txn.add(self.ovsdb.set_fail_mode(self.br_name,
+                                                 FAILMODE_SECURE))
         # Don't return until vswitchd sets up the internal port
         self.get_port_ofport(self.br_name)
 
@@ -252,6 +262,9 @@ class OVSBridge(BaseOVS):
     def delete_flows(self, **kwargs):
         self.do_action_flows('del', [kwargs])
 
+    def dump_flows_all_tables(self):
+        return self.dump_all_flows()
+
     def dump_flows_for_table(self, table):
         retval = None
         flow_str = "table=%s" % table
@@ -260,6 +273,10 @@ class OVSBridge(BaseOVS):
             retval = '\n'.join(item for item in flows.splitlines()
                                if 'NXST' not in item)
         return retval
+
+    def dump_all_flows(self):
+        return [f for f in self.run_ofctl("dump-flows", []).splitlines()
+                if 'NXST' not in f]
 
     def deferred(self, **kwargs):
         return DeferredOVSBridge(self, **kwargs)
@@ -477,9 +494,36 @@ class DeferredOVSBridge(object):
         raise AttributeError(name)
 
     def add_flow(self, **kwargs):
+        kwargs['cookie'] = self.br.agent_uuid_stamp
         self.action_flow_tuples.append(('add', kwargs))
 
+    def _filter_flows(self, flows):
+        LOG.debug("Agent uuid stamp used to filter flows: %s",
+                  self.br.agent_uuid_stamp)
+        cookie_re = re.compile('cookie=(0x[A-Fa-f0-9]*)')
+        table_re = re.compile('table=([0-9]*)')
+        for flow in flows:
+            fl_cookie = cookie_re.search(flow)
+            if not fl_cookie:
+                continue
+            fl_cookie = fl_cookie.group(1)
+            if int(fl_cookie, 16) != self.br.agent_uuid_stamp:
+                fl_table = table_re.search(flow)
+                if not fl_table:
+                    continue
+                fl_table = fl_table.group(1)
+                yield flow, fl_cookie, fl_table
+
+    def cleanup_flows(self):
+        flows = self.dump_flows_all_tables()
+        for flow, cookie, table in self._filter_flows(flows):
+            # deleting a stale flow should be rare.
+            # it might deserve some attention
+            LOG.warning(_LW("Deleting flow %s"), flow)
+            self.delete_flows(cookie=cookie + '/-1', table=table)
+
     def mod_flow(self, **kwargs):
+        kwargs['cookie'] = self.br.agent_uuid_stamp
         self.action_flow_tuples.append(('mod', kwargs))
 
     def delete_flows(self, **kwargs):
