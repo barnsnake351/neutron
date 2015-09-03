@@ -874,6 +874,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
         '''
         if not self.tun_br:
             self.tun_br = ovs_lib.OVSBridge(tun_br_name)
+
         self.tun_br.set_agent_uuid_stamp(self.agent_uuid_stamp)
 
         if not self.tun_br.bridge_exists('br-tun'):
@@ -896,7 +897,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
                           "ports. Agent terminated!"))
             exit(1)
         if cfg.CONF.AGENT.drop_flows_on_start:
-            self.tun_br.remove_all_flows()
+            self.tun_br.delete_flows()
 
     def setup_tunnel_br_flows(self):
         '''Setup the tunnel bridge.
