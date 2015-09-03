@@ -96,7 +96,11 @@ agent_opts = [
                       "timeout won't be changed")),
     cfg.BoolOpt('drop_flows_on_start', default=False,
                 help=_("Reset flow table on start. Setting this to True will "
-                       "cause brief traffic interruption."))
+                       "cause brief traffic interruption.")),
+    cfg.BoolOpt('remove_stale_flows', default=True,
+                help=_("Remove any stale flows that are not properly stamped "
+                       "with the local agent id. Setting this to False could "
+                       "be a potential security concern."))
 ]
 
 
