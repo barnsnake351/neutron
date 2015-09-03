@@ -13,6 +13,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from oslo_config import cfg
 from oslo_log import log as logging
 import oslo_messaging
 from oslo_utils import excutils
@@ -25,6 +26,7 @@ from neutron.plugins.openvswitch.common import constants
 
 LOG = logging.getLogger(__name__)
 
+cfg.CONF.import_group('AGENT', 'neutron.plugins.openvswitch.common.config')
 
 # A class to represent a DVR-hosted subnet including vif_ports resident on
 # that subnet
@@ -134,6 +136,7 @@ class OVSDVRNeutronAgent(object):
         self.dvr_mac_address = None
         if self.enable_distributed_routing:
             self.get_dvr_mac_address()
+        self.conf = cfg.CONF
 
     def setup_dvr_flows(self):
         self.setup_dvr_flows_on_integ_br()
@@ -204,7 +207,8 @@ class OVSDVRNeutronAgent(object):
         LOG.info(_LI("L2 Agent operating in DVR Mode with MAC %s"),
                  self.dvr_mac_address)
         # Remove existing flows in integration bridge
-        self.int_br.remove_all_flows()
+        if self.conf.AGENT.drop_flows_on_start:
+            self.int_br.delete_flows()
 
         # Add a canary flow to int_br to track OVS restarts
         self.int_br.add_flow(table=constants.CANARY_TABLE, priority=0,
