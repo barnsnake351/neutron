@@ -198,7 +198,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
 
         # Keep track of int_br's device count for use by _report_state()
         self.int_br_device_count = 0
-        self.agent_uuid_stamp = uuid.uuid64().int & UINT64_BITMASK
+        self.agent_uuid_stamp = uuid.uuid4().int & UINT64_BITMASK
 
         self.int_br = ovs_lib.OVSBridge(integ_br)
         self.setup_integration_br()
@@ -816,7 +816,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
         '''Setup the integration bridge.
 
         '''
-        self.inb_br_set_agent_uuid_stamp(self.agent_uuid_stamp)
+        self.int_br.set_agent_uuid_stamp(self.agent_uuid_stamp)
         # Ensure the integration bridge is created.
         # ovs_lib.OVSBridge.create() will run
         #   ovs-vsctl -- --may-exist add-br BRIDGE_NAME
@@ -873,12 +873,12 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
 
         if not self.tun_br.bridge_exists('br-tun'):
             self.tun_br.create(secure_mode=True)
-				if (not self.int_br.port_exists(cfg.CONF.OVS.int_peer_patch_port) or
+        if (not self.int_br.port_exists(cfg.CONF.OVS.int_peer_patch_port) or
                 self.patch_tun_ofport == ovs_lib.INVALID_OFPORT):
             self.patch_tun_ofport = self.int_br.add_patch_port(
                 cfg.CONF.OVS.int_peer_patch_port,
                 cfg.CONF.OVS.tun_peer_patch_port)
-        if (not self.tun_br.port_exists(cfg.CONF.OVS.int_tun_patch_port) or
+        if (not self.tun_br.port_exists(cfg.CONF.OVS.tun_peer_patch_port) or
                 self.patch_int_ofport == ovs_lib.INVALID_OFPORT):
             self.patch_int_ofport = self.tun_br.add_patch_port(
                 cfg.CONF.OVS.tun_peer_patch_port,
