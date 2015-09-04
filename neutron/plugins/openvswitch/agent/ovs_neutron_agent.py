@@ -131,9 +131,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
                  arp_responder=False,
                  prevent_arp_spoofing=True,
                  use_veth_interconnection=False,
-                 quitting_rpc_timeout=None,
-                 drop_flows_on_start=False,
-                 remove_stale_flows=True):
+                 quitting_rpc_timeout=None):
         '''Constructor.
 
         :param integ_br: name of the integration bridge.
@@ -161,11 +159,6 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
                interconnect the integration bridge to physical bridges.
         :param quitting_rpc_timeout: timeout in seconds for rpc calls after
                SIGTERM is received
-        :param drop_flows_on_start: Boolean value to indicate if all existing
-               flows should be cleared on agent start and rebuilt. Defaults
-               to False
-        :param remove_stale_flows: Boolean value to indicate if all flows marked
-               as stale should be cleared from the flow tables. Default=True
         '''
         super(OVSNeutronAgent, self).__init__()
         self.use_veth_interconnection = use_veth_interconnection
@@ -175,8 +168,6 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
         self.use_call = True
         self.tunnel_types = tunnel_types or []
         self.l2_pop = l2_population
-        self.drop_flows_on_start = drop_flows_on_start
-        self.remove_stale_flows = remove_stale_flows
         # TODO(ethuleau): Change ARP responder so it's not dependent on the
         #                 ML2 l2 population mechanism driver.
         self.enable_distributed_routing = enable_distributed_routing
@@ -834,7 +825,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
         self.int_br.set_secure_mode()
 
         self.int_br.delete_port(cfg.CONF.OVS.int_peer_patch_port)
-        if self.drop_flows_on_start:
+        if cfg.CONF.AGENT.drop_flows_on_start:
           self.int_br.remove_all_flows()
         # switch all traffic using L2 learning
         self.int_br.add_flow(priority=1, actions="normal")
@@ -900,7 +891,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
                           "version of OVS does not support tunnels or patch "
                           "ports. Agent terminated!"))
             exit(1)
-        if self.drop_flows_on_start:
+        if cfg.CONF.AGENT.drop_flows_on_start:
             self.tun_br.delete_flows()
 
     def setup_tunnel_br_flows(self):
@@ -1031,7 +1022,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
                            'bridge': bridge})
                 sys.exit(1)
             br = ovs_lib.OVSBridge(bridge)
-            if self.drop_flows_on_start:
+            if cfg.CONF.AGENT.drop_flows_on_start:
                 br.remove_all_flows()
             br.add_flow(priority=1, actions="normal")
             self.phys_brs[physical_network] = br
@@ -1652,7 +1643,7 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
                         # If treat devices fails - must resync with plugin
                         sync = self.process_network_ports(port_info,
                                                           ovs_restarted)
-                        if self.remove_stale_flows:
+                        if cfg.CONF.AGENT.remove_stale_flows:
                             self.cleanup_stale_flows()
                         LOG.debug("Agent rpc_loop - iteration:%(iter_num)d - "
                                   "ports processed. Elapsed:%(elapsed).3f",
